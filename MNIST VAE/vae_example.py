@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 
+
+import jax
 from jax import jit, lax, random
 from jax.example_libraries import stax
 import jax.numpy as jnp
@@ -131,6 +133,31 @@ def main(args):
             img_loc,
             cmap="gray",
         )
+    
+    @jit
+    def mse_loss(targets: jnp.ndarray, preds: jnp.ndarray):
+        def single_mse(target: jnp.ndarray, pred:jnp.ndarray):
+            target = target.reshape(-1)
+            pred = pred.reshape(-1)
+            return jnp.mean((target - pred)**2)
+        return jnp.mean(jax.vmap(single_mse)(targets, preds))
+
+
+    def epoch_conclude_mse(rng_key, test_idx):
+        def reconstruct(img, rng_key_sample):
+            test_sample = binarize(rng_key_binarize, img)
+            params = svi.get_params(svi_state)
+            z_mean, z_var = encoder_nn[1](
+                params["encoder$params"], test_sample.reshape([1, -1])
+            )
+            z = dist.Normal(z_mean, z_var).sample(rng_key_sample)
+            img_loc = decoder_nn[1](params["decoder$params"], z).reshape([28, 28])
+            return img_loc
+
+
+        imgs = test_fetch(0, test_idx)[0]
+        reconstructed = jax.vmap(reconstruct)(imgs, jax.random.split(rng_key, len(imgs)))
+        return mse_loss(imgs, reconstructed)
 
     for i in range(args.num_epochs):
         rng_key, rng_key_train, rng_key_test, rng_key_reconstruct = random.split(
@@ -143,9 +170,12 @@ def main(args):
         num_test, test_idx = test_init()
         test_loss = eval_test(svi_state, rng_key_test, test_idx)
         reconstruct_img(i, rng_key_reconstruct)
+
+        rng_key, rng_key_mse = jax.random.split(rng_key)
+        mse_loss_val = epoch_conclude_mse(rng_key, test_idx)
         print(
-            "Epoch {}: loss = {} ({:.2f} s.)".format(
-                i, test_loss, time.time() - t_start
+            "Epoch {}: loss = {} ({:.2f} s.), mse_loss = {}".format(
+                i, test_loss, time.time() - t_start, mse_loss_val
             )
         )
 

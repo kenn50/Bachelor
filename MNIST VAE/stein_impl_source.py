@@ -1,6 +1,8 @@
 # Copyright Contributors to the Pyro project.
 # SPDX-License-Identifier: Apache-2.0
 
+import jax
+
 from collections import namedtuple
 from copy import deepcopy
 import functools
@@ -315,7 +317,10 @@ class SteinVI:
                 lambda y, key: scan(
                     partial(body, y=y),
                     init,
-                    (random.split(key, self.num_stein_particles), particles, idxs),
+                    (   random.split(key, self.num_stein_particles), 
+                        particles, 
+                        idxs
+                     ),
                 )
             )(particles, particle_keys)
 
@@ -332,6 +337,10 @@ class SteinVI:
                 axis=0,
             )
         )(stein_particles)
+
+        # jax.debug.print("max repulsive force: {x}", x=jnp.abs(repulsive_force).max())
+        # jax.debug.print("max attr force: {x}", x=jnp.abs(attractive_force).max())
+
 
         particle_grads = attractive_force + repulsive_force
 
@@ -470,6 +479,13 @@ class SteinVI:
             **kwargs,
             **self.static_kwargs,
         )
+
+        leaf_abs = jax.tree.map(jnp.abs, grads)
+        leaf_mins = jax.tree.map(jnp.min, leaf_abs)
+        all_mins  =jnp.min(jnp.array(jax.tree.leaves(leaf_mins)))
+        #jax.debug.print("min gradient: {x}", x = all_mins)
+
+
         optim_state = self.optim.update(grads, optim_state, value=loss_val)
         return SteinVIState(
             optim_state, rng_key, state.loss_temperature, state.repulsion_temperature
