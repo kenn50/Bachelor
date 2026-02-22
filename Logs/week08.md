@@ -163,6 +163,25 @@ Epoch 12: loss = 7971818.0 (3.61 s.), mse_loss = 0.027505170553922653
 Epoch 13: loss = nan (3.06 s.), mse_loss = nan
 ```
 
+EDIT: After setting latent dimension and hidden dimension to the same as the VAE example, it indeed performs better:
+```python
+Epoch 0: loss = 292.33502197265625 (46.42 s.), mse_loss = 0.03159962221980095
+Epoch 1: loss = 572.9500732421875 (0.98 s.), mse_loss = 0.020180899649858475
+Epoch 2: loss = 411.0743713378906 (3.28 s.), mse_loss = 0.017833076417446136
+Epoch 3: loss = 515.7774047851562 (3.29 s.), mse_loss = 0.015704844146966934
+Epoch 4: loss = 575.5299682617188 (3.29 s.), mse_loss = 0.013818115927278996
+Epoch 5: loss = 552.0779418945312 (3.32 s.), mse_loss = 0.013038775883615017
+Epoch 6: loss = 720.43017578125 (3.29 s.), mse_loss = 0.013359283097088337
+Epoch 7: loss = 488.77978515625 (3.29 s.), mse_loss = 0.011911974288523197
+Epoch 8: loss = 564.1526489257812 (3.33 s.), mse_loss = 0.012914521619677544
+Epoch 9: loss = 492.6183776855469 (3.30 s.), mse_loss = 0.012693608179688454
+Epoch 10: loss = 520.7996826171875 (0.85 s.), mse_loss = 0.012004649266600609
+Epoch 11: loss = 612.8050537109375 (3.29 s.), mse_loss = 0.012090461328625679
+Epoch 12: loss = 511.09857177734375 (3.27 s.), mse_loss = 0.01125369779765606
+Epoch 13: loss = 561.8724365234375 (3.30 s.), mse_loss = 0.011793434619903564
+Epoch 14: loss = 506.2474670410156 (3.28 s.), mse_loss = 0.011394042521715164
+```
+
 #### MSE Loss compared to standard SVI
 Running the same mse compare logic on the "VAE with SVI" example i get:
 ```
@@ -183,20 +202,23 @@ Epoch 13: loss = 105.13158416748047 (0.12 s.), mse_loss = 0.016703523695468903
 Epoch 14: loss = 104.62661743164062 (0.12 s.), mse_loss = 0.015447555109858513
 ```
 
-As can be seen, the mse results are generally better for the standard SVI engine.
+~~As can be seen, the mse results are generally better for the standard SVI engine.~~
+It is slightly worse, showing slight improvement using the SMI engine.
 
 
 ## Takeaways from this week
-- SMI works in python. Produces okay-ish results, though not outperforming a regular VAE. 
+- SMI works in python. ~~Produces okay-ish results, though not outperforming a regular VAE.~~ It does outperform the VAE
 - There are some parts of the optimization that sometimes "explode" which produces very large gradients and sometimes gives "NaN" values. 
 - I have tried to solve/investigate those issues. Even though i feel i am beginning to understand the source better, i have not managed to figure it out.
 - Some potential ideas could be changing optimizer/kernel.
 - I discovered the Ola Rønnings [PHD thesis](https://di.ku.dk/english/research/phd/phd-theses/2023/Ola_PhD_Thesis.pdf) which describes the main ideas of the code base, which was interesting and might be helpful later on.
 - The VAE example i have been building on does everything very manually. SMI might work better just doing the basic approach: Define model, define guide, run.
+- The code feels a little unorganized and chaotic, might be a good idea to clean up.
 
 
 ## Next week:
 - Hopefully get past this SMI obstacle in some way, since i feel like i am wasting a lot of time on weird unintuitive stuff, like reading through source code.
+
 
 
 
