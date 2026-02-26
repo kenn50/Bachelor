@@ -436,7 +436,7 @@ class SteinVI:
             {
                 k: params[k]
                 for k, site in guide_trace.items()
-                if site["type"] == "param" and site["name"] in guide_init_params
+                if site["type"] == "param" and site["name"] in guide_init_params and not self.non_mixture_params_fn(site["name"])
             },
             nbatch_dims=1,
         )
