@@ -480,10 +480,7 @@ class SteinVI:
             **self.static_kwargs,
         )
 
-        leaf_abs = jax.tree.map(jnp.abs, grads)
-        leaf_mins = jax.tree.map(jnp.min, leaf_abs)
-        all_mins  =jnp.min(jnp.array(jax.tree.leaves(leaf_mins)))
-        #jax.debug.print("min gradient: {x}", x = all_mins)
+
 
 
         optim_state = self.optim.update(grads, optim_state, value=loss_val)
