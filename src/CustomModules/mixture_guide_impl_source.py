@@ -90,7 +90,7 @@ class MixtureGuidePredictive:
             guide,
             {},
             self._batch_shape,
-            return_sites="",
+            return_sites=["m", "z"],
             parallel=self.parallel,
             model_args=args,
             model_kwargs=kwargs,

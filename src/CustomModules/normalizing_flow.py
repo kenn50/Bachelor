@@ -37,8 +37,8 @@ def normalizing_flow(input_dim, hidden_dims=[16,16], steps=10, inv =True):
         for i in range(steps):
             transforms.append(single_layer_apply(params[i]))
 
-        if i < steps - 1:
-            transforms.append(PermuteTransform(permutation))
+            if i < steps - 1:
+                transforms.append(PermuteTransform(permutation))
             
         return ComposeTransform(transforms)
 
