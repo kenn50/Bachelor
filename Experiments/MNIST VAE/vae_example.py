@@ -19,6 +19,9 @@ import numpyro.distributions as dist
 from numpyro.examples.datasets import MNIST, load_dataset
 from numpyro.infer import SVI, Trace_ELBO
 
+
+
+
 RESULTS_DIR = "./vae_example_results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
