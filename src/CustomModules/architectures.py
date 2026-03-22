@@ -163,7 +163,9 @@ class GlobalVAE(BaseVAE):
 
     def get_guide_m(self):
         def guide_m(**kwargs):
-            a = numpyro.param("a", jnp.zeros(self.z_dim))
+            def a_init(key):
+                return dist.Normal(0, 5).expand([self.z_dim]).sample(key)
+            a = numpyro.param("a", a_init)
             B = numpyro.param("B", jnp.ones(self.z_dim), constraint=dist.constraints.positive)
             m = numpyro.sample("m", dist.Normal(a, B).to_event(1))
             return m
@@ -350,7 +352,7 @@ class NormalizingGlobalVAE(GlobalVAE):
 
 
 class SteinGlobalVAE(GlobalVAE):
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1):
         self.train_mode()
         self.inference = False
         self.total_size = total_size
@@ -365,7 +367,14 @@ class SteinGlobalVAE(GlobalVAE):
                 return True
         
 
-        stein = SteinVI(self.get_training_model(), self.get_guide(), optim, kernel, num_stein_particles=num_stein_particles, non_mixture_guide_params_fn=non_stein)
+        stein = SteinVI(self.get_training_model(), 
+                        self.get_guide(),
+                          optim, 
+                          kernel, 
+                          num_stein_particles=num_stein_particles, 
+                          non_mixture_guide_params_fn=non_stein, 
+                          repulsion_temperature=repulsion_temperature)
+
         
         dummy_batch = next(iter(dataloader))
         svi_state = stein.init(rng_key, dummy_batch)
@@ -394,13 +403,69 @@ class SteinGlobalVAE(GlobalVAE):
 
                 g = numpyro.handlers.seed(guide_m, rng_seed=m_key)
                 g = numpyro.handlers.substitute(g, data=params)
-                return g()
+                return g(), particle
 
         batch_keys = jax.random.split(rng_key, n)
 
-        ms = jax.vmap(m_single)(batch_keys)
+        ms, pidx = jax.vmap(m_single)(batch_keys)
 
-        return ms
+        return ms, pidx
+
+    def encode_batch(self, batch, rng_key):
+        self.eval_mode()
+        
+        ms_key, seed_key = jax.random.split(rng_key)
+
+        ms, pidx = self.get_ms(ms_key, batch.shape[0])
+        
+
+        guide = self.get_guide_z()
+        guide = substitute(guide, data=self.params)
+        guide = seed(guide, rng_seed=seed_key)
+        guide = trace(guide)
+        raw_trace = guide.get_trace(batch, ms)
+        values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
+        values["m"] = ms
+        values["pidx"] = pidx
+        return values
+    
+    def sample(self, rng_key, num_samples=100):
+        self.eval_mode()
+
+        ms_key, seed_key = jax.random.split(rng_key)
+
+        ms, pidx = self.get_ms(ms_key, num_samples)
+
+        model = self.get_generative_model()
+        model = substitute(model, data={"m": ms, **self.params})
+        model = seed(model, rng_seed=seed_key)
+        model = trace(model)
+        raw_trace = model.get_trace(num_samples=num_samples)
+        values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
+        values["pidx"] = pidx
+        return values
+    
+    def decode_latent(self, variables, rng_key):
+        self.eval_mode()
+
+        ms_key, seed_key = jax.random.split(rng_key)
+
+        pidx = None
+
+        if not "m" in variables.keys():
+            ms, pidx = self.get_ms(ms_key, variables["z"].shape[0])
+            variables["m"] = ms 
+        
+
+        model = self.get_generative_model()
+        model = substitute(model, data={**variables, **self.params})
+        model = seed(model, rng_seed=seed_key)
+        model = trace(model)
+        raw_trace = model.get_trace(num_samples = variables["z"].shape[0])
+        values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
+        values["pidx"] = pidx
+        return values
+        
 
 
     
