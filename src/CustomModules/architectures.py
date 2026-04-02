@@ -25,11 +25,8 @@ class BaseVAE:
             decoder_stax,
             decoder_args,
             z_dim,
-            *args,
-
             model_mode: Literal["n", "b"] = "n", 
-            normal_scale=0.1,
-            **kwargs):
+            normal_scale=0.1):
         
         self.encoder = encoder_stax
         self.encoder_args = encoder_args
@@ -156,11 +153,6 @@ class BaseVAE:
 
 
 class GlobalVAE(BaseVAE):
-    def __init__(self, *args, is_stein=False, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.is_stein = is_stein
-    
-
     def get_guide_m(self):
         def guide_m(**kwargs):
             def a_init(key):
@@ -211,20 +203,22 @@ class GlobalVAE(BaseVAE):
                 m = numpyro.sample("m", dist.Normal(0, 1).expand([self.z_dim]).to_event(1))
 
                 global_dist = dist.Normal(m, 1)
-                return global_dist
+                return m, global_dist
             
             if not self.inference:
-                global_dist = get_global_dist()
+                m, global_dist = get_global_dist()
             
             plate_size = self.total_size if not self.inference else num_samples
             with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
 
                 if self.inference:
-                    global_dist = get_global_dist()
+                    m, global_dist = get_global_dist()
 
                 z = numpyro.sample("z", global_dist.to_event(1))
+
+                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
                 
-                img_loc = decode(z)
+                img_loc = decode(concat_input)
                 
                 numpyro.deterministic("clean", img_loc)
                 
@@ -303,17 +297,39 @@ class GlobalVAE(BaseVAE):
     
 
 
-class NormalizingGlobalVAE(GlobalVAE):
-    def __init__(self, *args, flow, flow_args, **kwargs):
-        super().__init__(*args, **kwargs)
+class ModelFlowGlobalVAE(GlobalVAE):
+
+    def __init__(
+        self, 
+        encoder_stax,
+        encoder_args,
+        decoder_stax,
+        decoder_args,
+        z_dim,
+        flow,
+        flow_args,
+        model_mode: Literal["n", "b"] = "n", 
+        normal_scale=0.1):
+        
+        super().__init__(
+            encoder_stax,
+            encoder_args,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            model_mode, 
+            normal_scale
+        )
+
         self.flow = flow
         self.flow_args = flow_args
+        
     
     def get_generative_model(self):
         
         def generative_model(num_samples, **kwargs):
             
-            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim))
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
             
             flow_transform = numpyro.module(
                 "flow", 
@@ -326,29 +342,88 @@ class NormalizingGlobalVAE(GlobalVAE):
                 m = numpyro.sample("m", d)
                 m_dist = dist.Normal(m, 1).to_event(1)
                 flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
-                return flow_dist
+                return m, flow_dist
             
             if not self.inference:
-                flow_dist = get_flow_dist()
+                m, flow_dist = get_flow_dist()
             
             plate_size = self.total_size if not self.inference else num_samples
             with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
 
                 if self.inference:
-                    flow_dist = get_flow_dist()
+                    m, flow_dist = get_flow_dist()
 
                 z = numpyro.sample("z", flow_dist)
+
+                #Include m in the decoder input
+                numpyro.deterministic("m", m)
+                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
                 
-                img_loc = decode(z)
+                img_loc = decode(concat_input)
                 
                 numpyro.deterministic("clean", img_loc)
                 
+
+                # P(x|z,m)
                 return numpyro.sample(
                     "obs", 
                     dist.Normal(img_loc, scale=0.1).to_event(1)
                 )
                 
         return generative_model
+
+
+
+
+
+class GuideFlowGlobalVAE(GlobalVAE):
+    def __init__(
+        self, 
+        encoder_stax,
+        encoder_args,
+        decoder_stax,
+        decoder_args,
+        z_dim,
+        flow,
+        flow_args,
+        model_mode: Literal["n", "b"] = "n", 
+        normal_scale=0.1):
+        
+        super().__init__(
+            encoder_stax,
+            encoder_args,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            model_mode, 
+            normal_scale
+        )
+
+        self.flow = flow
+        self.flow_args = flow_args
+    
+    def get_guide_m(self):
+        def guide_m(**kwargs):
+            flow_transform = numpyro.module(
+                "flow", 
+                self.flow(**self.flow_args),
+                input_shape=(self.z_dim,)
+            )()
+            def a_init(key):
+                return dist.Normal(0, 5).expand([self.z_dim]).sample(key)
+            a = numpyro.param("a", a_init)
+            B = numpyro.param("B", jnp.ones(self.z_dim), constraint=dist.constraints.positive)
+
+            m_dist =  dist.Normal(a, B).to_event(1)
+            flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
+            m = numpyro.sample("m", flow_dist)
+            return m
+
+        return guide_m
+    
+
+
+
 
 
 class SteinGlobalVAE(GlobalVAE):
@@ -469,5 +544,9 @@ class SteinGlobalVAE(GlobalVAE):
 
 
     
-class SteinNormalizingVAE(SteinGlobalVAE, NormalizingGlobalVAE):
+class SteinModelFlowVAE(SteinGlobalVAE, ModelFlowGlobalVAE):
     pass
+
+class SteinGuideFlowVAE(SteinGlobalVAE, GuideFlowGlobalVAE):
+    pass
+
