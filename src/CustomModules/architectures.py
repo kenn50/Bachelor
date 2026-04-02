@@ -158,7 +158,7 @@ class GlobalVAE(BaseVAE):
             def a_init(key):
                 return dist.Normal(0, 5).expand([self.z_dim]).sample(key)
             a = numpyro.param("a", a_init)
-            B = numpyro.param("B", jnp.ones(self.z_dim), constraint=dist.constraints.positive)
+            B = numpyro.param("B", 0.1*jnp.ones(self.z_dim), constraint=dist.constraints.positive)
             m = numpyro.sample("m", dist.Normal(a, B).to_event(1))
             return m
 
@@ -334,7 +334,7 @@ class GuideFlowGlobalVAE(GlobalVAE):
             def a_init(key):
                 return dist.Normal(0, 5).expand([self.z_dim]).sample(key)
             a = numpyro.param("a", a_init)
-            B = numpyro.param("B", jnp.ones(self.z_dim), constraint=dist.constraints.positive)
+            B = numpyro.param("B", 0.1*jnp.ones(self.z_dim), constraint=dist.constraints.positive)
 
             m_dist =  dist.Normal(a, B).to_event(1)
             flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
@@ -344,16 +344,87 @@ class GuideFlowGlobalVAE(GlobalVAE):
         return guide_m
     
 
+class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
+    def __init__(
+        self, 
+        encoder_stax,
+        encoder_args,
+        decoder_stax,
+        decoder_args,
+        mean_network_stax,
+        mean_network_args,
+        z_dim,
+        flow,
+        flow_args,
+        model_mode: Literal["n", "b"] = "n", 
+        normal_scale=0.1):
+        
+        super().__init__(
+            encoder_stax,
+            encoder_args,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            flow,
+            flow_args,
+            model_mode, 
+            normal_scale
+        )
 
+        self.mean_network = mean_network_stax
+        self.mean_network_args = mean_network_args
+
+    def get_generative_model(self):
+        
+        def generative_model(num_samples, **kwargs):
+            
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
+            
+
+            def get_global_dist():
+
+                m = numpyro.sample("m", dist.Normal(0, 1).expand([self.z_dim]).to_event(1))
+                mean_network = numpyro.module("mean_network", self.mean_network(**self.mean_network_args), m.shape)
+                mean, var = mean_network(m) 
+                mean = mean + m
+
+
+                global_dist = dist.Normal(mean, var)
+                return m, global_dist
+            
+            if not self.inference:
+                m, global_dist = get_global_dist()
+            
+            plate_size = self.total_size if not self.inference else num_samples
+            with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
+
+                if self.inference:
+                    m, global_dist = get_global_dist()
+
+                z = numpyro.sample("z", global_dist.to_event(1))
+
+                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
+                
+                img_loc = decode(concat_input)
+                
+                numpyro.deterministic("clean", img_loc)
+                
+                #P(x|z, m)
+                return numpyro.sample(
+                    "obs", 
+                    dist.Normal(img_loc, scale=0.1).to_event(1)
+                )
+                
+        return generative_model
 
 
 class SteinGlobalVAE(GlobalVAE):
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, bandwidth_scaler=1):
         self.train_mode()
         self.inference = False
         self.total_size = total_size
 
-        kernel = SingleSiteRBFKernel("a")
+        kernel = SingleSiteRBFKernel("a", bandwidth_factor=lambda n: bandwidth_scaler / jnp.log(n))
         self.num_stein_particles = num_stein_particles
     
         def non_stein(name):
@@ -469,3 +540,6 @@ class SteinGlobalVAE(GlobalVAE):
 class SteinGuideFlowVAE(SteinGlobalVAE, GuideFlowGlobalVAE):
     pass
 
+
+class LearnedMeanSteinGuideFlowVAE(SteinGlobalVAE, LearnedMeanGuideFlowGlobalVAE):
+    pass
