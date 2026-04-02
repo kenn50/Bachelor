@@ -195,7 +195,7 @@ class GlobalVAE(BaseVAE):
         
         def generative_model(num_samples, **kwargs):
             
-            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim))
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
 
 
             def get_global_dist():
@@ -222,6 +222,7 @@ class GlobalVAE(BaseVAE):
                 
                 numpyro.deterministic("clean", img_loc)
                 
+                #P(x|z, m)
                 return numpyro.sample(
                     "obs", 
                     dist.Normal(img_loc, scale=0.1).to_event(1)
@@ -297,85 +298,6 @@ class GlobalVAE(BaseVAE):
     
 
 
-class ModelFlowGlobalVAE(GlobalVAE):
-
-    def __init__(
-        self, 
-        encoder_stax,
-        encoder_args,
-        decoder_stax,
-        decoder_args,
-        z_dim,
-        flow,
-        flow_args,
-        model_mode: Literal["n", "b"] = "n", 
-        normal_scale=0.1):
-        
-        super().__init__(
-            encoder_stax,
-            encoder_args,
-            decoder_stax,
-            decoder_args,
-            z_dim,
-            model_mode, 
-            normal_scale
-        )
-
-        self.flow = flow
-        self.flow_args = flow_args
-        
-    
-    def get_generative_model(self):
-        
-        def generative_model(num_samples, **kwargs):
-            
-            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
-            
-            flow_transform = numpyro.module(
-                "flow", 
-                self.flow(**self.flow_args),
-                input_shape=(num_samples, self.z_dim)
-            )()
-
-            def get_flow_dist():
-                d = dist.Normal(0, 1).expand([self.z_dim]).to_event(1)
-                m = numpyro.sample("m", d)
-                m_dist = dist.Normal(m, 1).to_event(1)
-                flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
-                return m, flow_dist
-            
-            if not self.inference:
-                m, flow_dist = get_flow_dist()
-            
-            plate_size = self.total_size if not self.inference else num_samples
-            with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
-
-                if self.inference:
-                    m, flow_dist = get_flow_dist()
-
-                z = numpyro.sample("z", flow_dist)
-
-                #Include m in the decoder input
-                numpyro.deterministic("m", m)
-                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
-                
-                img_loc = decode(concat_input)
-                
-                numpyro.deterministic("clean", img_loc)
-                
-
-                # P(x|z,m)
-                return numpyro.sample(
-                    "obs", 
-                    dist.Normal(img_loc, scale=0.1).to_event(1)
-                )
-                
-        return generative_model
-
-
-
-
-
 class GuideFlowGlobalVAE(GlobalVAE):
     def __init__(
         self, 
@@ -425,7 +347,6 @@ class GuideFlowGlobalVAE(GlobalVAE):
 
 
 
-
 class SteinGlobalVAE(GlobalVAE):
     def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1):
         self.train_mode()
@@ -457,12 +378,15 @@ class SteinGlobalVAE(GlobalVAE):
 
         update_step = jax.jit(stein.update)
         
+        t = trange(num_epochs)
             
-        for epoch in trange(num_epochs):
+        for epoch in t:
             for batch in dataloader:
                 svi_state, loss = update_step(svi_state, batch)
-                
-        self.params = stein.get_params(svi_state)
+            if epoch % 25 == 0:
+                t.set_description(f"Epoch {epoch}, Loss: {loss:.2f}")
+
+            self.params = stein.get_params(svi_state)
 
 
     
@@ -541,11 +465,6 @@ class SteinGlobalVAE(GlobalVAE):
         values["pidx"] = pidx
         return values
         
-
-
-    
-class SteinModelFlowVAE(SteinGlobalVAE, ModelFlowGlobalVAE):
-    pass
 
 class SteinGuideFlowVAE(SteinGlobalVAE, GuideFlowGlobalVAE):
     pass
