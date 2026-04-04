@@ -181,7 +181,7 @@ class FlowBasicVAE(BaseVAE):
         
         def generative_model(num_samples, **kwargs):
             
-            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim))
             
             flow_transform = numpyro.module(
                 "flow", 
