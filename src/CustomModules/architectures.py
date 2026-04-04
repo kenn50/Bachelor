@@ -151,6 +151,55 @@ class BaseVAE:
         self.params = svi.get_params(svi_state)
 
 
+class FlowBasicVAE(BaseVAE):
+    def __init__(
+        self, 
+        encoder_stax,
+        encoder_args,
+        decoder_stax,
+        decoder_args,
+        z_dim,
+        flow,
+        flow_args,
+        model_mode: Literal["n", "b"] = "n", 
+        normal_scale=0.1):
+        
+        super().__init__(
+            encoder_stax,
+            encoder_args,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            model_mode, 
+            normal_scale
+        )
+
+        self.flow = flow
+        self.flow_args = flow_args
+    
+    def get_generative_model(self):
+        
+        def generative_model(num_samples, **kwargs):
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim))
+
+
+            plate_size = self.total_size if not self.inference else num_samples
+            with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
+
+                z = numpyro.sample("z", dist.Normal(0, 1).expand([self.z_dim]).to_event(1))
+                x = numpyro.deterministic("x", decode(z))
+
+                if self.model_mode=="n":    
+                    return numpyro.sample(
+                        "obs", 
+                        dist.Normal(x, scale=self.normal_scale).to_event(1)
+                    )
+                elif self.model_mode=="b":
+                    return numpyro.sample("obs", dist.Bernoulli(x).to_event(1))
+                
+        return generative_model
+
+
 
 class GlobalVAE(BaseVAE):
     def get_guide_m(self):
