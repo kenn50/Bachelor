@@ -180,22 +180,38 @@ class FlowBasicVAE(BaseVAE):
     def get_generative_model(self):
         
         def generative_model(num_samples, **kwargs):
-            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim))
+            
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
+            
+            flow_transform = numpyro.module(
+                "flow", 
+                self.flow(**self.flow_args),
+                input_shape=(num_samples, self.z_dim)
+            )()
 
+            def get_flow_dist():
+                d = dist.Normal(0, 1).expand([self.z_dim]).to_event(1)
+                m = numpyro.sample("m", d)
+                m_dist = dist.Normal(m, 1).to_event(1)
+                flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
+                return flow_dist
+            
 
+            
             plate_size = self.total_size if not self.inference else num_samples
             with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
 
-                z = numpyro.sample("z", dist.Normal(0, 1).expand([self.z_dim]).to_event(1))
-                x = numpyro.deterministic("x", decode(z))
+                z = numpyro.sample("z", get_flow_dist())
 
-                if self.model_mode=="n":    
-                    return numpyro.sample(
-                        "obs", 
-                        dist.Normal(x, scale=self.normal_scale).to_event(1)
-                    )
-                elif self.model_mode=="b":
-                    return numpyro.sample("obs", dist.Bernoulli(x).to_event(1))
+                img_loc = decode(z)
+                
+                numpyro.deterministic("clean", img_loc)
+                
+                # P(x|z,m)
+                return numpyro.sample(
+                    "obs", 
+                    dist.Normal(img_loc, scale=0.1).to_event(1)
+                )
                 
         return generative_model
 
