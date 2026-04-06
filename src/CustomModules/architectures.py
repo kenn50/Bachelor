@@ -13,6 +13,7 @@ from numpyro.infer import SVI, Trace_ELBO
 
 from CustomModules.stein_impl_source import SteinVI
 from CustomModules.single_site_rbf import SingleSiteRBFKernel
+from CustomModules.custom_messengers import scale_sites
 
 
 from tqdm import trange
@@ -36,6 +37,7 @@ class BaseVAE:
         self.model_mode = model_mode
         self.normal_scale = normal_scale
         self.inference = False
+
 
     def train_mode(self):
         self.inference = False
@@ -130,7 +132,8 @@ class BaseVAE:
         return values
     
 
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, annealed_sites=["z"], annealing_epochs=100):
+        assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
         self.train_mode()
         self.total_size = total_size
 
@@ -139,14 +142,18 @@ class BaseVAE:
 
         dummy_batch = next(iter(dataloader))
         svi_state = svi.init(rng_key, dummy_batch)
-        
 
-        update_step = jax.jit(svi.update)
+
+        @jax.jit
+        def annealed_update_step(svi_state, batch, beta):
+            with scale_sites(scale=beta, sites=annealed_sites):
+                return svi.update(svi_state, batch)
+        
         
             
         for epoch in trange(num_epochs):
             for batch in dataloader:
-                svi_state, loss = update_step(svi_state, batch)
+                svi_state, loss = annealed_update_step(svi_state, batch, beta=min(1.0, 1.0*epoch/annealing_epochs))
                 
         self.params = svi.get_params(svi_state)
 
@@ -484,7 +491,9 @@ class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
 
 
 class SteinGlobalVAE(GlobalVAE):
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, bandwidth_scaler=1):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=100):
+        assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
+        
         self.train_mode()
         self.inference = False
         self.total_size = total_size
@@ -510,19 +519,24 @@ class SteinGlobalVAE(GlobalVAE):
         
         dummy_batch = next(iter(dataloader))
         svi_state = stein.init(rng_key, dummy_batch)
-        
 
-        update_step = jax.jit(stein.update)
+
+        @jax.jit
+        def annealed_update_step(svi_state, batch, beta):
+            with scale_sites(scale=beta, sites=annealed_sites):
+                return stein.update(svi_state, batch)
         
         t = trange(num_epochs)
             
         for epoch in t:
             for batch in dataloader:
-                svi_state, loss = update_step(svi_state, batch)
+                svi_state, loss = annealed_update_step(svi_state, batch, beta=min(1.0, 1.0*epoch/annealing_epochs))
             if epoch % 25 == 0:
                 t.set_description(f"Epoch {epoch}, Loss: {loss:.2f}")
 
             self.params = stein.get_params(svi_state)
+
+        
 
 
     
