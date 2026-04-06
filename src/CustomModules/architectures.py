@@ -199,9 +199,7 @@ class FlowBasicVAE(BaseVAE):
 
             def get_flow_dist():
                 d = dist.Normal(0, 1).expand([self.z_dim]).to_event(1)
-                m = numpyro.sample("m", d)
-                m_dist = dist.Normal(m, 1).to_event(1)
-                flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
+                flow_dist = dist.TransformedDistribution(d, flow_transform)
                 return flow_dist
             
 
