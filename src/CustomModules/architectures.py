@@ -134,6 +134,7 @@ class BaseVAE:
 
     def train(self, dataloader, total_size, optim, num_epochs, rng_key, annealed_sites=["z"], annealing_epochs=100):
         assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
+        annealing_epochs = max(1, annealing_epochs)
         self.train_mode()
         self.total_size = total_size
 
@@ -153,7 +154,7 @@ class BaseVAE:
             
         for epoch in trange(num_epochs):
             for batch in dataloader:
-                svi_state, loss = annealed_update_step(svi_state, batch, beta=min(1.0, 1.0*epoch/annealing_epochs))
+                svi_state, loss = annealed_update_step(svi_state, batch, beta=max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
                 
         self.params = svi.get_params(svi_state)
 
@@ -530,7 +531,7 @@ class SteinGlobalVAE(GlobalVAE):
             
         for epoch in t:
             for batch in dataloader:
-                svi_state, loss = annealed_update_step(svi_state, batch, beta=min(1.0, 1.0*epoch/annealing_epochs))
+                svi_state, loss = annealed_update_step(svi_state, batch, beta=max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
             if epoch % 25 == 0:
                 t.set_description(f"Epoch {epoch}, Loss: {loss:.2f}")
 
