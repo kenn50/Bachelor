@@ -14,7 +14,7 @@ from numpyro.infer import SVI, Trace_ELBO
 from CustomModules.stein_impl_source import SteinVI
 from CustomModules.single_site_rbf import SingleSiteRBFKernel
 from CustomModules.custom_messengers import scale_sites
-
+from sklearn.cluster import KMeans
 
 from tqdm import trange
 
@@ -81,6 +81,7 @@ class BaseVAE:
                         dist.Normal(x, scale=self.normal_scale).to_event(1)
                     )
                 elif self.model_mode=="b":
+
                     return numpyro.sample("obs", dist.Bernoulli(x).to_event(1))
                 
         return generative_model
@@ -621,3 +622,141 @@ class SteinGuideFlowVAE(SteinGlobalVAE, GuideFlowGlobalVAE):
 
 class LearnedMeanSteinGuideFlowVAE(SteinGlobalVAE, LearnedMeanGuideFlowGlobalVAE):
     pass
+
+
+
+class PostHocSteinVAE(BaseVAE):
+
+    def __init__(
+        self, 
+        encoder_stax,
+        encoder_args,
+        decoder_stax,
+        decoder_args,
+        z_dim,
+        model_mode: Literal["n", "b"] = "n", 
+        normal_scale=0.1
+    ):
+        super().__init__(
+            encoder_stax,
+            encoder_args,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            model_mode, 
+            normal_scale
+        )
+
+    def get_post_hoc_prior_guide(self):
+        def prior_guide(batch=None, num_samples=None, **kwargs):
+            assert (batch is not None) or (num_samples is not None), "Must provide either batch or num_samples"
+            n = batch.shape[0] if batch is not None else num_samples
+        
+
+            a = numpyro.param("a", lambda key: dist.Normal(0, 5).expand([self.z_dim]).sample(key))
+            B = numpyro.param("B", lambda key: 0.1*jnp.ones(self.z_dim), constraint=dist.constraints.positive)
+            with numpyro.plate("batch", n):
+                z = numpyro.sample("z", dist.Normal(a, B).to_event(1))
+
+                return z
+        return prior_guide
+
+
+
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, annealed_sites=["z"], annealing_epochs=100, num_stein_particles=5, post_hoc_epochs=1000):
+        key1, key2 = jax.random.split(rng_key)
+        self.num_stein_particles = num_stein_particles
+        
+        assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
+        annealing_epochs = max(1, annealing_epochs)
+        self.train_mode()
+        self.total_size = total_size
+
+        svi = SVI(self.get_training_model(), self.get_guide(), optim, Trace_ELBO())
+        
+        
+
+        dummy_batch = next(iter(dataloader))
+        svi_state = svi.init(key1, dummy_batch)
+
+
+        @jax.jit
+        def annealed_update_step(svi_state, batch, beta):
+            with scale_sites(scale=beta, sites=annealed_sites):
+                return svi.update(svi_state, batch)
+        
+        
+            
+        for epoch in trange(num_epochs):
+            for batch in dataloader:
+                svi_state, loss = annealed_update_step(svi_state, batch, beta=max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
+                
+        self.params = svi.get_params(svi_state)
+
+
+
+
+        # Post hoc STEIN VI on prior
+
+
+
+        kernel = SingleSiteRBFKernel("a", bandwidth_factor=lambda n: 1 / jnp.log(n))
+        frozen_model = substitute(self.get_training_model(), data=self.params)
+        
+        stein = SteinVI(frozen_model,self.get_post_hoc_prior_guide(), optim, kernel, num_stein_particles=num_stein_particles, repulsion_temperature=1) 
+
+
+        stein_state = stein.init(key2, dummy_batch)
+
+        #Overwrite starting place for a
+
+        init_batch = next(iter(dataloader))
+        encoded_trace = self.encode_batch(init_batch, key2)
+        encoded_zs = encoded_trace["z"]
+        KMeans_model = KMeans(n_clusters=num_stein_particles, random_state=0).fit(encoded_zs)
+        init_a = jnp.array(KMeans_model.cluster_centers_)
+
+
+
+        p = stein.get_params(stein_state)
+        p["a"] = init_a
+
+        stein_state =stein_state._replace(optim_state=optim.init(p))
+
+
+        jitted_step = jax.jit(stein.update)
+
+
+        
+
+        for epoch in trange(post_hoc_epochs):
+            for batch in dataloader:
+                stein_state, loss = jitted_step(stein_state, batch)
+        
+        
+        self.post_hoc_params = stein.get_params(stein_state)
+    
+
+    def get_post_hoc_samples(self, rng_key, num_samples=100):
+        self.eval_mode()
+        guide = self.get_post_hoc_prior_guide()
+
+        def single_sample(rng_key):
+            rng_key, sub_key, g_key = jax.random.split(rng_key, 3)
+            particle = jax.random.randint(sub_key, (), 0, self.num_stein_particles)
+            params = dict(self.post_hoc_params)
+
+            params["a"] = jax.tree.map(lambda x: x[particle], params["a"])
+            params["B"] = jax.tree.map(lambda x: x[particle], params["B"])
+
+            g = numpyro.handlers.seed(guide, rng_seed=g_key)
+            g = numpyro.handlers.substitute(g, data=params)
+            return g(num_samples=1)[0], particle
+        zs, zidx = jax.vmap(single_sample)(jax.random.split(rng_key, num_samples))
+        return {"z": zs, "zidx": zidx}
+
+        
+
+    
+    
+    
