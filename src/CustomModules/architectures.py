@@ -110,14 +110,14 @@ class BaseVAE:
         values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
         return values
     
-    def decode_latent(self, sites, rng_key):
+    def decode_latent(self, sites, rng_key, size_site="z"):
         self.eval_mode()
 
         model = self.get_generative_model()
         model = substitute(model, data={**sites, **self.params})
         model = seed(model, rng_seed=rng_key)
         model = trace(model)
-        raw_trace = model.get_trace(num_samples = sites["z"].shape[0])
+        raw_trace = model.get_trace(num_samples = sites[size_site].shape[0])
         values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
         return values
     
@@ -350,13 +350,13 @@ class GlobalVAE(BaseVAE):
         values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
         return values
     
-    def decode_latent(self, variables, rng_key):
+    def decode_latent(self, variables, rng_key, size_site="z"):
         self.eval_mode()
 
         ms_key, seed_key = jax.random.split(rng_key)
 
         if not "m" in variables.keys():
-            ms = self.get_ms(ms_key, variables["z"].shape[0])
+            ms = self.get_ms(ms_key, variables[size_site].shape[0])
             variables["m"] = ms 
         
 
@@ -364,7 +364,7 @@ class GlobalVAE(BaseVAE):
         model = substitute(model, data={**variables, **self.params})
         model = seed(model, rng_seed=seed_key)
         model = trace(model)
-        raw_trace = model.get_trace(num_samples = variables["z"].shape[0])
+        raw_trace = model.get_trace(num_samples = variables[size_site].shape[0])
         values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
         return values
     
@@ -594,7 +594,7 @@ class SteinGlobalVAE(GlobalVAE):
         values["pidx"] = pidx
         return values
     
-    def decode_latent(self, variables, rng_key):
+    def decode_latent(self, variables, rng_key, size_site="z"):
         self.eval_mode()
 
         ms_key, seed_key = jax.random.split(rng_key)
@@ -602,7 +602,7 @@ class SteinGlobalVAE(GlobalVAE):
         pidx = None
 
         if not "m" in variables.keys():
-            ms, pidx = self.get_ms(ms_key, variables["z"].shape[0])
+            ms, pidx = self.get_ms(ms_key, variables[size_site].shape[0])
             variables["m"] = ms 
         
 
@@ -610,7 +610,7 @@ class SteinGlobalVAE(GlobalVAE):
         model = substitute(model, data={**variables, **self.params})
         model = seed(model, rng_seed=seed_key)
         model = trace(model)
-        raw_trace = model.get_trace(num_samples = variables["z"].shape[0])
+        raw_trace = model.get_trace(num_samples = variables[size_site].shape[0])
         values = {k: v["value"] for k, v in raw_trace.items() if v["type"] in ["sample", "deterministic"]}
         values["pidx"] = pidx
         return values
@@ -757,6 +757,141 @@ class PostHocSteinVAE(BaseVAE):
 
         
 
+
+
+class VAE74(GuideFlowGlobalVAE):
+    def __init__(
+        self, 
+        decoder_stax,
+        decoder_args,
+        f_stax,
+        f_args,
+        h_stax,
+        h_args,
+        g_e_stax,
+        g_e_args,
+        g_d_stax,
+        g_d_args,
+        levels,
+        z_dim,
+        flow,
+        flow_args,
+        model_mode: Literal["n", "b"] = "n", 
+        normal_scale=0.1):
+
+
+        #New
+        self.f_stax = f_stax
+        self.f_args = f_args
+        self.h_stax = h_stax
+        self.h_args = h_args
+        self.g_e_stax = g_e_stax
+        self.g_e_args = g_e_args
+        self.g_d_stax = g_d_stax
+        self.g_d_args = g_d_args
+        self.L = levels
+
+        super().__init__(
+            None, # No encoder network in this architecture
+            None,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            flow,
+            flow_args,
+            model_mode,
+            normal_scale)
+
+
+
+
+
+    def get_generative_model(self):
+        
+        def generative_model(num_samples, **kwargs):
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
+
+            f_input_shape = (num_samples, 2*self.z_dim)
+            f_output_shape, _ = self.f_stax(**self.f_args)[0](numpyro.prng_key(),f_input_shape)
+            
+            f_shared = numpyro.module("f", self.f_stax(**self.f_args), (num_samples, 2*self.z_dim)) # f(parent, m)
+            g_d = numpyro.module("g_d", self.g_d_stax(**self.g_d_args), f_output_shape) # g_d(z)
+
+            def get_global_dist():
+                m = numpyro.sample("m", dist.Normal(0, 1).expand([self.z_dim]).to_event(1))
+                return m
+            
+            if not self.inference:
+                m = get_global_dist()
+            
+            plate_size = self.total_size if not self.inference else num_samples
+            with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
+
+                if self.inference:
+                    m = get_global_dist()
+
+                z = jnp.zeros((num_samples, self.z_dim)) #starts as dummy zeros
+                #For each level l from L-1 to 0:
+                for l in range(self.L)[::-1]:
+                    shared_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
+                    shared_out = f_shared(shared_input)
+                    z = numpyro.sample(f"z{l}", dist.Normal(g_d(shared_out), 1).to_event(1))
+
+                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
+
+                x_mean = decode(concat_input)
+                
+                numpyro.deterministic("x_mean", x_mean)
+                
+                #P(x|z, m)
+                return numpyro.sample(
+                    "obs", 
+                    dist.Normal(x_mean, scale=self.normal_scale).to_event(1)
+                )
+                
+        return generative_model
+
+    def get_guide_z(self):
+        def guide_z(batch, m, **kwargs):
+            batch = jnp.reshape(batch, (batch.shape[0], -1))
+            batch_dim, out_dim = jnp.shape(batch)
+           
+
+
+            f_input_shape = (batch_dim, 2*self.z_dim)
+            k = jax.random.PRNGKey(42) # Just for shapes so dont care about random key here
+            f_output_shape, _ = self.f_stax(**self.f_args)[0](k,f_input_shape)
+
+            h_input_shape = (batch_dim, out_dim)
+            h_output_shape, _ = self.h_stax(**self.h_args)[0](k,h_input_shape)
+
+
+            h = numpyro.module("h", self.h_stax(**self.h_args), (batch_dim, out_dim))
+            
+            f_shared = numpyro.module("f", self.f_stax(**self.f_args), (batch_dim, 2*self.z_dim)) # f(parent, m)
+            g_e = numpyro.module("g_e", self.g_e_stax(**self.g_e_args), (batch_dim, f_output_shape[-1]+h_output_shape[-1])) # g_e(, h(parent)) 
+
+            h_out = h(batch)
+
+            m_broadcasted = m + jnp.zeros((batch_dim, self.z_dim))
+
+            plate_size = self.total_size if not self.inference else batch_dim
+            with numpyro.plate("batch", size=plate_size, subsample_size=batch_dim):
+                z = jnp.zeros((batch_dim, self.z_dim)) #starts as dummy zeros
+                for l in range(self.L)[::-1]:
+                    f_input = jnp.concat([z, m_broadcasted], axis=1)
+                    f_out = f_shared(f_input)
+                    g_e_input = jnp.concat([f_out, h_out], axis=1)
+                    g_e_out = g_e(g_e_input)
+                    z = numpyro.sample(f"z{l}", dist.Normal(g_e_out, 1).to_event(1))
+                    
+                return None
+        return guide_z
     
+    
+
+
+class SMIVAE74(SteinGlobalVAE, VAE74):
+    pass
     
     
