@@ -139,6 +139,8 @@ class BaseVAE:
         self.train_mode()
         self.total_size = total_size
 
+
+
         svi = SVI(self.get_training_model(), self.get_guide(), optim, Trace_ELBO())
         
 
@@ -529,10 +531,12 @@ class SteinGlobalVAE(GlobalVAE):
         t = trange(num_epochs)
             
         for epoch in t:
+            loss_sum = 0
             for batch in dataloader:
-                svi_state, loss = annealed_update_step(svi_state, batch, beta=max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
-            if epoch % 25 == 0:
-                t.set_description(f"Epoch {epoch}, Loss: {loss:.2f}")
+                svi_state, _, loss = annealed_update_step(svi_state, batch, max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
+                loss_sum += loss
+            
+            t.set_description(f"Epoch {epoch}, Loss: {loss_sum/total_size:.2f}")
 
             self.params = stein.get_params(svi_state)
 
@@ -774,6 +778,7 @@ class VAE74(GuideFlowGlobalVAE):
         g_d_args,
         levels,
         z_dim,
+        m_dim,
         flow,
         flow_args,
         model_mode: Literal["n", "b"] = "n", 
@@ -790,6 +795,8 @@ class VAE74(GuideFlowGlobalVAE):
         self.g_d_stax = g_d_stax
         self.g_d_args = g_d_args
         self.L = levels
+
+        self.m_dim = m_dim
 
         super().__init__(
             None, # No encoder network in this architecture
@@ -809,16 +816,16 @@ class VAE74(GuideFlowGlobalVAE):
     def get_generative_model(self):
         
         def generative_model(num_samples, **kwargs):
-            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, 2*self.z_dim))
+            decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim + self.m_dim))
 
-            f_input_shape = (num_samples, 2*self.z_dim)
+            f_input_shape = (num_samples, self.z_dim + self.m_dim)
             f_output_shape, _ = self.f_stax(**self.f_args)[0](numpyro.prng_key(),f_input_shape)
             
-            f_shared = numpyro.module("f", self.f_stax(**self.f_args), (num_samples, 2*self.z_dim)) # f(parent, m)
+            f_shared = numpyro.module("f", self.f_stax(**self.f_args), (num_samples, self.z_dim + self.m_dim)) # f(parent, m)
             g_d = numpyro.module("g_d", self.g_d_stax(**self.g_d_args), f_output_shape) # g_d(z)
 
             def get_global_dist():
-                m = numpyro.sample("m", dist.Normal(0, 1).expand([self.z_dim]).to_event(1))
+                m = numpyro.sample("m", dist.Normal(0, 1).expand([self.m_dim]).to_event(1))
                 return m
             
             if not self.inference:
@@ -833,23 +840,55 @@ class VAE74(GuideFlowGlobalVAE):
                 z = jnp.zeros((num_samples, self.z_dim)) #starts as dummy zeros
                 #For each level l from L-1 to 0:
                 for l in range(self.L)[::-1]:
-                    shared_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
+                    shared_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.m_dim))], axis=1)
                     shared_out = f_shared(shared_input)
-                    z = numpyro.sample(f"z{l}", dist.Normal(g_d(shared_out), 1).to_event(1))
+                    g_d_mean, g_d_scale = g_d(shared_out)
+                    z = numpyro.sample(f"z{l}", dist.Normal(g_d_mean, g_d_scale).to_event(1))
 
-                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.z_dim))], axis=1)
+                concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.m_dim))], axis=1)
 
-                x_mean = decode(concat_input)
+                x = decode(concat_input)
                 
-                numpyro.deterministic("x_mean", x_mean)
-                
+                numpyro.deterministic("x", jax.nn.sigmoid(x))
+
                 #P(x|z, m)
-                return numpyro.sample(
-                    "obs", 
-                    dist.Normal(x_mean, scale=self.normal_scale).to_event(1)
-                )
+                if self.model_mode=="n":    
+                    return numpyro.sample(
+                        "obs", 
+                        dist.Normal(x, scale=self.normal_scale).to_event(1)
+                    )
+                elif self.model_mode=="b":
+
+                    return numpyro.sample("obs", dist.Bernoulli(logits=x).to_event(1))
+
+
+                
+                
+
                 
         return generative_model
+
+   
+    def get_guide_m(self):
+        def guide_m(**kwargs):
+
+            flow_transform = numpyro.module(
+                "flow", 
+                self.flow(**self.flow_args),
+                input_shape=(self.m_dim,)
+            )()
+            def a_init(key):
+                return dist.Normal(0, 5).expand([self.m_dim]).sample(key)
+            a = numpyro.param("a", a_init)
+            B = numpyro.param("B", 0.1*jnp.ones(self.m_dim), constraint=dist.constraints.positive)
+
+            m_dist =  dist.Normal(a, B+1e-3).to_event(1)
+            flow_dist = dist.TransformedDistribution(m_dist, flow_transform)
+            m = numpyro.sample("m", flow_dist) 
+            return m
+
+        return guide_m
+
 
     def get_guide_z(self):
         def guide_z(batch, m, **kwargs):
@@ -858,22 +897,29 @@ class VAE74(GuideFlowGlobalVAE):
            
 
 
-            f_input_shape = (batch_dim, 2*self.z_dim)
+            f_input_shape = (batch_dim, self.z_dim + self.m_dim)
             k = jax.random.PRNGKey(42) # Just for shapes so dont care about random key here
             f_output_shape, _ = self.f_stax(**self.f_args)[0](k,f_input_shape)
 
             h_input_shape = (batch_dim, out_dim)
-            h_output_shape, _ = self.h_stax(**self.h_args)[0](k,h_input_shape)
+            h_output_shape, h_init_params = self.h_stax(**self.h_args)[0](k,h_input_shape)
 
 
             h = numpyro.module("h", self.h_stax(**self.h_args), (batch_dim, out_dim))
             
-            f_shared = numpyro.module("f", self.f_stax(**self.f_args), (batch_dim, 2*self.z_dim)) # f(parent, m)
+            f_shared = numpyro.module("f", self.f_stax(**self.f_args), (batch_dim, self.z_dim + self.m_dim)) # f(parent, m)
             g_e = numpyro.module("g_e", self.g_e_stax(**self.g_e_args), (batch_dim, f_output_shape[-1]+h_output_shape[-1])) # g_e(, h(parent)) 
 
             h_out = h(batch)
 
-            m_broadcasted = m + jnp.zeros((batch_dim, self.z_dim))
+            h_params = numpyro.param("h$params", h_init_params)
+
+            #Check for NaNs in h_out
+            jax.lax.cond(jnp.isnan(h_out).any(),
+                lambda: jax.debug.print("NaNs in h_out!: {h_out}, batch: {batch}, param: {param}", h_out=h_out, batch=batch, param=h_params),
+                lambda: None)
+
+            m_broadcasted = m + jnp.zeros((batch_dim, self.m_dim))
 
             plate_size = self.total_size if not self.inference else batch_dim
             with numpyro.plate("batch", size=plate_size, subsample_size=batch_dim):
@@ -882,16 +928,18 @@ class VAE74(GuideFlowGlobalVAE):
                     f_input = jnp.concat([z, m_broadcasted], axis=1)
                     f_out = f_shared(f_input)
                     g_e_input = jnp.concat([f_out, h_out], axis=1)
-                    g_e_out = g_e(g_e_input)
-                    z = numpyro.sample(f"z{l}", dist.Normal(g_e_out, 1).to_event(1))
+                    g_e_mean, g_e_scale = g_e(g_e_input)
+                    z = numpyro.sample(f"z{l}", dist.Normal(g_e_mean, g_e_scale).to_event(1))
+                    
                     
                 return None
         return guide_z
-    
     
 
 
 class SMIVAE74(SteinGlobalVAE, VAE74):
     pass
     
-    
+
+
+

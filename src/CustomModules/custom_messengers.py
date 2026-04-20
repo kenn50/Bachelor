@@ -1,5 +1,6 @@
 # CREATED BY GEMINI 3.1
 
+import jax
 from numpyro.primitives import Messenger
 
 class scale_sites(Messenger):
@@ -14,6 +15,7 @@ class scale_sites(Messenger):
         # Intercept the message and check the site name
         if msg.get("name") in self.sites and msg.get("type") in ("sample", "param"):
             current_scale = msg.get("scale")
+            
             # Apply the scale factor directly to the message
             if current_scale is None:
                 msg["scale"] = self.scale

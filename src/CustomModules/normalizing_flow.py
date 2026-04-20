@@ -1,10 +1,12 @@
 import jax
-from numpyro.distributions.transforms import ComposeTransform, PermuteTransform
+from numpyro.distributions.transforms import ComposeTransform, PermuteTransform, IdentityTransform
 from numpyro.distributions.flows import InverseAutoregressiveTransform
 from numpyro.nn import AutoregressiveNN
 import jax.numpy as jnp
 
 def flow_transform(input_dim, hidden_dims, inv):
+
+    
     arn_init, arn_apply = AutoregressiveNN(input_dim=input_dim, hidden_dims=hidden_dims)
     
     def apply_fn(params):
@@ -21,6 +23,15 @@ def flow_transform(input_dim, hidden_dims, inv):
     return arn_init, apply_fn
 
 def normalizing_flow(input_dim, hidden_dims=[16,16], steps=10, inv =True):
+    if steps==0 or hidden_dims == []:
+        # Return identity transform if no flow steps or hidden dims are specified
+        def init_fun(rng, input_shape):
+            return (), None
+        def apply_fun(params, *args, **kwargs):
+            return IdentityTransform()
+        return init_fun, apply_fun
+
+
     arn_init, single_layer_apply = flow_transform(input_dim, hidden_dims, inv)
     
     def init_fun(rng, input_shape):

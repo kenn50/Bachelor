@@ -338,11 +338,11 @@ class SteinVI:
             )
         )(stein_particles)
 
-        # jax.debug.print("max repulsive force: {x}", x=jnp.abs(repulsive_force).max())
-        # jax.debug.print("max attr force: {x}", x=jnp.abs(attractive_force).max())
 
 
         particle_grads = attractive_force + repulsive_force
+
+        
 
         # Compute non-mixture parameter gradients.
         nonmix_uparam_grads = grad(
@@ -364,7 +364,21 @@ class SteinVI:
         res_grads = tree.map(
             lambda x: -x, {**nonmix_uparam_grads, **stein_uparam_grads}
         )
-        return jnp.linalg.norm(particle_grads), res_grads
+
+
+        elbo_loss_val = self.stein_loss.loss(
+            classic_key,
+            self.constrain_fn(nonmix_uparams),
+            model,
+            self.guide,
+            unravel_pytree_batched(vmap(particle_transform_fn)(stein_particles)),
+            *args,
+            **kwargs,
+        )
+
+        jax.lax.cond(jnp.isnan(particle_grads).any(), lambda: jax.debug.print("NaN detected in particle gradients!: {loss}", loss=elbo_loss_val), lambda: None)
+
+        return jnp.linalg.norm(particle_grads), res_grads, elbo_loss_val
 
     def init(self, rng_key, *args, **kwargs):
         """Register random variable transformations, constraints and determine initialize positions of the particles.
@@ -470,7 +484,7 @@ class SteinVI:
         rng_key, rng_key_mcmc, rng_key_step = random.split(state.rng_key, num=3)
         params = self.optim.get_params(state.optim_state)
         optim_state = state.optim_state
-        loss_val, grads = self._svgd_loss_and_grads(
+        loss_val, grads, elbo_loss = self._svgd_loss_and_grads(
             rng_key_step,
             params,
             state.loss_temperature,
@@ -486,7 +500,7 @@ class SteinVI:
         optim_state = self.optim.update(grads, optim_state, value=loss_val)
         return SteinVIState(
             optim_state, rng_key, state.loss_temperature, state.repulsion_temperature
-        ), loss_val
+        ), loss_val, elbo_loss
 
     def setup_run(self, rng_key, num_steps, args, init_state, kwargs):
         if init_state is None:
@@ -568,7 +582,7 @@ class SteinVI:
         # we split to have the same seed as `update_fn` given a state
         _, _, rng_key_eval = random.split(state.rng_key, num=3)
         params = self.optim.get_params(state.optim_state)
-        normed_stein_force, _ = self._svgd_loss_and_grads(
+        normed_stein_force, _, _ = self._svgd_loss_and_grads(
             rng_key_eval,
             params,
             state.loss_temperature,
