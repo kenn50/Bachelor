@@ -18,6 +18,8 @@ from sklearn.cluster import KMeans
 
 from tqdm import trange
 
+from jax.experimental import checkify
+
 class BaseVAE:
     def __init__(
             self, 
@@ -493,7 +495,7 @@ class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
 
 
 class SteinGlobalVAE(GlobalVAE):
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=100):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=100, beta_ceiling=2.0):
         assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
         
         self.train_mode()
@@ -523,24 +525,28 @@ class SteinGlobalVAE(GlobalVAE):
         svi_state = stein.init(rng_key, dummy_batch)
 
 
-        @jax.jit
+        
         def annealed_update_step(svi_state, batch, beta):
             with scale_sites(scale=beta, sites=annealed_sites):
                 return stein.update(svi_state, batch)
         
         t = trange(num_epochs)
-            
+        
+        count = 0
+
+        jitted_step = jax.jit(checkify.checkify(annealed_update_step))
+
         for epoch in t:
             loss_sum = 0
             for batch in dataloader:
-                svi_state, _, loss = annealed_update_step(svi_state, batch, max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
+                err, (svi_state, _, loss) = jitted_step(svi_state, batch, max(1e-4, min(beta_ceiling, beta_ceiling*epoch/annealing_epochs))) #Beta-VAE style, going up to beta_ceiling
                 loss_sum += loss
-            
+                count+= 1
             t.set_description(f"Epoch {epoch}, Loss: {loss_sum/total_size:.2f}")
 
             self.params = stein.get_params(svi_state)
 
-        
+        print(f"Ran with {count} batches")
 
 
     
@@ -816,6 +822,7 @@ class VAE74(GuideFlowGlobalVAE):
     def get_generative_model(self):
         
         def generative_model(num_samples, **kwargs):
+
             decode = numpyro.module("decoder", self.decoder(**self.decoder_args), (num_samples, self.z_dim + self.m_dim))
 
             f_input_shape = (num_samples, self.z_dim + self.m_dim)
@@ -878,7 +885,7 @@ class VAE74(GuideFlowGlobalVAE):
                 input_shape=(self.m_dim,)
             )()
             def a_init(key):
-                return dist.Normal(0, 5).expand([self.m_dim]).sample(key)
+                return dist.Normal(0, 1).expand([self.m_dim]).sample(key)
             a = numpyro.param("a", a_init)
             B = numpyro.param("B", 0.1*jnp.ones(self.m_dim), constraint=dist.constraints.positive)
 
@@ -904,20 +911,21 @@ class VAE74(GuideFlowGlobalVAE):
             h_input_shape = (batch_dim, out_dim)
             h_output_shape, h_init_params = self.h_stax(**self.h_args)[0](k,h_input_shape)
 
+            checkify.check(h_output_shape[1] == f_output_shape[1], "Must be the same since they will be summed together")
+
 
             h = numpyro.module("h", self.h_stax(**self.h_args), (batch_dim, out_dim))
             
             f_shared = numpyro.module("f", self.f_stax(**self.f_args), (batch_dim, self.z_dim + self.m_dim)) # f(parent, m)
-            g_e = numpyro.module("g_e", self.g_e_stax(**self.g_e_args), (batch_dim, f_output_shape[-1]+h_output_shape[-1])) # g_e(, h(parent)) 
+            g_e = numpyro.module("g_e", self.g_e_stax(**self.g_e_args), (batch_dim, f_output_shape[-1])) # g_e(, h(parent)) 
 
             h_out = h(batch)
 
             h_params = numpyro.param("h$params", h_init_params)
 
             #Check for NaNs in h_out
-            jax.lax.cond(jnp.isnan(h_out).any(),
-                lambda: jax.debug.print("NaNs in h_out!: {h_out}, batch: {batch}, param: {param}", h_out=h_out, batch=batch, param=h_params),
-                lambda: None)
+            checkify.check(~jnp.isnan(h_out).any(), "NaNs found in h_out!: {h_out}, batch: {batch}, param: {param}", h_out=h_out, batch=batch, param=h_params)
+
 
             m_broadcasted = m + jnp.zeros((batch_dim, self.m_dim))
 
@@ -927,7 +935,8 @@ class VAE74(GuideFlowGlobalVAE):
                 for l in range(self.L)[::-1]:
                     f_input = jnp.concat([z, m_broadcasted], axis=1)
                     f_out = f_shared(f_input)
-                    g_e_input = jnp.concat([f_out, h_out], axis=1)
+                    #g_e_input = jnp.concat([f_out, h_out], axis=1)
+                    g_e_input = f_out + h_out
                     g_e_mean, g_e_scale = g_e(g_e_input)
                     z = numpyro.sample(f"z{l}", dist.Normal(g_e_mean, g_e_scale).to_event(1))
                     
