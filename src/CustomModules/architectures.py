@@ -29,7 +29,7 @@ class BaseVAE:
             decoder_args,
             z_dim,
             model_mode: Literal["n", "b"] = "n", 
-            normal_scale=0.1):
+            normal_scale=1.0):
         
         self.encoder = encoder_stax
         self.encoder_args = encoder_args
@@ -175,7 +175,7 @@ class FlowBasicVAE(BaseVAE):
         flow,
         flow_args,
         model_mode: Literal["n", "b"] = "n", 
-        normal_scale=0.1):
+        normal_scale=1.0):
         
         super().__init__(
             encoder_stax,
@@ -385,7 +385,7 @@ class GuideFlowGlobalVAE(GlobalVAE):
         flow,
         flow_args,
         model_mode: Literal["n", "b"] = "n", 
-        normal_scale=0.1):
+        normal_scale=1.0):
         
         super().__init__(
             encoder_stax,
@@ -433,7 +433,7 @@ class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
         flow,
         flow_args,
         model_mode: Literal["n", "b"] = "n", 
-        normal_scale=0.1):
+        normal_scale=1.0):
         
         super().__init__(
             encoder_stax,
@@ -495,7 +495,8 @@ class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
 
 
 class SteinGlobalVAE(GlobalVAE):
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=100, beta_ceiling=2.0):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, 
+              bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=100, beta_ceiling=1.0, num_elbo_particles=10):
         assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
         
         self.train_mode()
@@ -518,7 +519,8 @@ class SteinGlobalVAE(GlobalVAE):
                           kernel, 
                           num_stein_particles=num_stein_particles, 
                           non_mixture_guide_params_fn=non_stein, 
-                          repulsion_temperature=repulsion_temperature)
+                          repulsion_temperature=repulsion_temperature,
+                          num_elbo_particles=num_elbo_particles)
 
         
         dummy_batch = next(iter(dataloader))
@@ -536,17 +538,22 @@ class SteinGlobalVAE(GlobalVAE):
 
         jitted_step = jax.jit(checkify.checkify(annealed_update_step))
 
+        stein_particle_norms = [] #Useful for analyzing convergence
+
         for epoch in t:
             loss_sum = 0
             for batch in dataloader:
-                err, (svi_state, _, loss) = jitted_step(svi_state, batch, max(1e-4, min(beta_ceiling, beta_ceiling*epoch/annealing_epochs))) #Beta-VAE style, going up to beta_ceiling
-                loss_sum += loss
+                err, (svi_state, _, extra_info) = jitted_step(svi_state, batch, max(1e-4, min(beta_ceiling, beta_ceiling*epoch/annealing_epochs))) #Beta-VAE style, going up to beta_ceiling
+                loss_sum += extra_info["elbo"]
+                stein_particle_norms.append(extra_info["per_particle_norms"])
                 count+= 1
             t.set_description(f"Epoch {epoch}, Loss: {loss_sum/total_size:.2f}")
 
             self.params = stein.get_params(svi_state)
 
         print(f"Ran with {count} batches")
+
+        return jnp.stack(stein_particle_norms)
 
 
     
@@ -645,7 +652,7 @@ class PostHocSteinVAE(BaseVAE):
         decoder_args,
         z_dim,
         model_mode: Literal["n", "b"] = "n", 
-        normal_scale=0.1
+        normal_scale=1.0
     ):
         super().__init__(
             encoder_stax,
@@ -741,7 +748,7 @@ class PostHocSteinVAE(BaseVAE):
 
         for epoch in trange(post_hoc_epochs):
             for batch in dataloader:
-                stein_state, loss = jitted_step(stein_state, batch)
+                stein_state, _, loss = jitted_step(stein_state, batch)
         
         
         self.post_hoc_params = stein.get_params(stein_state)
@@ -788,7 +795,7 @@ class VAE74(GuideFlowGlobalVAE):
         flow,
         flow_args,
         model_mode: Literal["n", "b"] = "n", 
-        normal_scale=0.1):
+        normal_scale=1.0):
 
 
         #New

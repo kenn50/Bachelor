@@ -1,7 +1,11 @@
 README.md
 pyproject.toml
 src/CustomModules/__init__.py
+src/CustomModules/architectures.py
+src/CustomModules/custom_messengers.py
 src/CustomModules/mixture_guide_impl_source.py
+src/CustomModules/normalizing_flow.py
+src/CustomModules/single_site_rbf.py
 src/CustomModules/stax_impl_source.py
 src/CustomModules/stein_impl_source.py
 src/bachelor_project.egg-info/PKG-INFO

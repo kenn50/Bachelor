@@ -360,10 +360,14 @@ class SteinVI:
         # Decompose the monolithic particle forces back to concrete parameter values.
         stein_uparam_grads = unravel_pytree_batched(particle_grads)
 
+        
+
         # Return loss and gradients (based on parameter forces).
         res_grads = tree.map(
             lambda x: -x, {**nonmix_uparam_grads, **stein_uparam_grads}
         )
+
+        per_particle_norms = jnp.linalg.norm(particle_grads, axis=1)
 
 
         elbo_loss_val = self.stein_loss.loss(
@@ -377,8 +381,10 @@ class SteinVI:
         )
 
         jax.lax.cond(jnp.isnan(particle_grads).any(), lambda: jax.debug.print("NaN detected in particle gradients!: {loss}", loss=elbo_loss_val), lambda: None)
+        
+        extra_info = {"elbo": elbo_loss_val, "per_particle_norms": per_particle_norms}
 
-        return jnp.linalg.norm(particle_grads), res_grads, elbo_loss_val
+        return jnp.linalg.norm(particle_grads), res_grads, extra_info
 
     def init(self, rng_key, *args, **kwargs):
         """Register random variable transformations, constraints and determine initialize positions of the particles.
@@ -484,7 +490,7 @@ class SteinVI:
         rng_key, rng_key_mcmc, rng_key_step = random.split(state.rng_key, num=3)
         params = self.optim.get_params(state.optim_state)
         optim_state = state.optim_state
-        loss_val, grads, elbo_loss = self._svgd_loss_and_grads(
+        loss_val, grads, extra_info = self._svgd_loss_and_grads(
             rng_key_step,
             params,
             state.loss_temperature,
@@ -500,7 +506,7 @@ class SteinVI:
         optim_state = self.optim.update(grads, optim_state, value=loss_val)
         return SteinVIState(
             optim_state, rng_key, state.loss_temperature, state.repulsion_temperature
-        ), loss_val, elbo_loss
+        ), loss_val, extra_info
 
     def setup_run(self, rng_key, num_steps, args, init_state, kwargs):
         if init_state is None:
