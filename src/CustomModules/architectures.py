@@ -229,6 +229,22 @@ class FlowBasicVAE(BaseVAE):
 
 
 class GlobalVAE(BaseVAE):
+    def __init__(
+            self, 
+            encoder_stax,
+            encoder_args,
+            decoder_stax,
+            decoder_args,
+            z_dim,
+            model_mode: Literal["n", "b"] = "n", 
+            normal_scale=1.0):
+        super().__init__(encoder_stax, encoder_args, decoder_stax, decoder_args, z_dim, model_mode, normal_scale)
+
+        #Whether to use a different global variable for each sample, or one shared global variable
+        self.per_sample_global = True 
+
+
+
     def get_guide_m(self):
         def guide_m(**kwargs):
             def a_init(key):
@@ -281,13 +297,13 @@ class GlobalVAE(BaseVAE):
                 global_dist = dist.Normal(m, 1)
                 return m, global_dist
             
-            if not self.inference:
+            if not self.inference or not self.per_sample_global:
                 m, global_dist = get_global_dist()
             
             plate_size = self.total_size if not self.inference else num_samples
             with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
 
-                if self.inference:
+                if self.inference and self.per_sample_global:
                     m, global_dist = get_global_dist()
 
                 z = numpyro.sample("z", global_dist.to_event(1))
@@ -326,8 +342,12 @@ class GlobalVAE(BaseVAE):
         self.eval_mode()
         
         ms_key, seed_key = jax.random.split(rng_key)
+        
 
-        ms = self.get_ms(ms_key, batch.shape[0])
+        if self.per_sample_global:
+            ms = self.get_ms(ms_key, batch.shape[0])
+        else:
+            ms = self.get_ms(ms_key, 1)[0]
         
 
         guide = self.get_guide_z()
@@ -340,11 +360,15 @@ class GlobalVAE(BaseVAE):
         return values
     
     def sample(self, rng_key, num_samples=100):
+
         self.eval_mode()
 
-        ms_key, seed_key = jax.random.split(rng_key)
 
-        ms = self.get_ms(ms_key, num_samples)
+        ms_key, seed_key = jax.random.split(rng_key)
+        if self.per_sample_global:
+            ms = self.get_ms(ms_key, num_samples)
+        else:
+            ms = self.get_ms(ms_key, 1)[0]
 
         model = self.get_generative_model()
         model = substitute(model, data={"m": ms, **self.params})
@@ -355,12 +379,16 @@ class GlobalVAE(BaseVAE):
         return values
     
     def decode_latent(self, variables, rng_key, size_site="z"):
+        variables = dict(variables)
         self.eval_mode()
 
         ms_key, seed_key = jax.random.split(rng_key)
 
         if not "m" in variables.keys():
-            ms = self.get_ms(ms_key, variables[size_site].shape[0])
+            if self.per_sample_global:
+                ms = self.get_ms(ms_key, variables[size_site].shape[0])
+            else:
+                ms = self.get_ms(ms_key, 1)[0]
             variables["m"] = ms 
         
 
@@ -468,13 +496,13 @@ class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
                 global_dist = dist.Normal(mean, var)
                 return m, global_dist
             
-            if not self.inference:
+            if not self.inference or not self.per_sample_global:
                 m, global_dist = get_global_dist()
             
             plate_size = self.total_size if not self.inference else num_samples
             with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
 
-                if self.inference:
+                if self.inference and self.per_sample_global:
                     m, global_dist = get_global_dist()
 
                 z = numpyro.sample("z", global_dist.to_event(1))
@@ -582,7 +610,13 @@ class SteinGlobalVAE(GlobalVAE):
         
         ms_key, seed_key = jax.random.split(rng_key)
 
-        ms, pidx = self.get_ms(ms_key, batch.shape[0])
+
+        if self.per_sample_global:
+            ms, pidx = self.get_ms(ms_key, batch.shape[0])
+        else:
+            ms, pidx = self.get_ms(ms_key, 1)
+            pidx = pidx[0]
+            ms = ms[0]
         
 
         guide = self.get_guide_z()
@@ -600,7 +634,12 @@ class SteinGlobalVAE(GlobalVAE):
 
         ms_key, seed_key = jax.random.split(rng_key)
 
-        ms, pidx = self.get_ms(ms_key, num_samples)
+        if self.per_sample_global:
+            ms, pidx = self.get_ms(ms_key, num_samples)
+        else:
+            ms, pidx = self.get_ms(ms_key, 1)
+            pidx = pidx[0]
+            ms = ms[0]
 
         model = self.get_generative_model()
         model = substitute(model, data={"m": ms, **self.params})
@@ -612,14 +651,20 @@ class SteinGlobalVAE(GlobalVAE):
         return values
     
     def decode_latent(self, variables, rng_key, size_site="z"):
+        variables = dict(variables)
         self.eval_mode()
 
         ms_key, seed_key = jax.random.split(rng_key)
 
-        pidx = None
+        pidx = variables.get("pidx", None)
 
         if not "m" in variables.keys():
-            ms, pidx = self.get_ms(ms_key, variables[size_site].shape[0])
+            if self.per_sample_global:
+                ms, pidx = self.get_ms(ms_key, variables[size_site].shape[0])
+            else:
+                ms, pidx = self.get_ms(ms_key, 1)
+                pidx = pidx[0]
+                ms = ms[0]
             variables["m"] = ms 
         
 
@@ -842,13 +887,13 @@ class VAE74(GuideFlowGlobalVAE):
                 m = numpyro.sample("m", dist.Normal(0, 1).expand([self.m_dim]).to_event(1))
                 return m
             
-            if not self.inference:
+            if not self.inference or not self.per_sample_global:
                 m = get_global_dist()
             
             plate_size = self.total_size if not self.inference else num_samples
             with numpyro.plate("batch", size=plate_size, subsample_size=num_samples):
 
-                if self.inference:
+                if self.inference and self.per_sample_global:
                     m = get_global_dist()
 
                 z = jnp.zeros((num_samples, self.z_dim)) #starts as dummy zeros
