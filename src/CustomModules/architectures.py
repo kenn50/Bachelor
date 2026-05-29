@@ -1,3 +1,30 @@
+'''
+This is the main contribution of the entire project. A file with a lot of architectures described. Each architecture is inherited from some previous architectures 
+Going back to the root BaseVAE. Even though Jax wants functionally pure functions and does not work well with classes, we have taken an object oriented approach
+where we are careful to jit compile only specific functions, that can be trated as pure enough.
+Thus this script provides interfaces/library for these underlying principles in a way that can be used on many different datasets etc. 
+The actual two archtectures described in the final thesis are SteinGlobalVAE and SteinHierarchicalVAE.
+
+
+The generel idea for the architecture is the following:
+
+- We keep hyperparameters on the class level, being initialized in __init__
+- Then NymPyro works with functions and not classes, so we use factory-functions ie. functions that produce functions with the hyperparameters frozen inside as constants. 
+that way the function return from get_guide or get_model are functions that can directly be input into some NumPyro training loop.
+- A training function, that streamlines the exact intended training process for a specific architecture. The way it works is that we jit compile the update step of the either SVI or STEINVI. 
+By only jit-compiling this step, which is the most expensive, and keeping everything else in standard python it allows us to use standard datalaoders such as numpy dataloaders converted from 
+Datasets library or custom lists of batches. 
+The training function at last saves the parameters result inside the class again.
+- Helper functions such as:
+    - Encode batch, which takes a batch and uses the parameters saved in 'params" to convert the data to latent space.
+    - Decode batch, which takes latent points and convert them back into data-space
+    - Sample, which samples from the posterior predictive q(m|D) and runs through the generative model. 
+'''
+
+
+
+
+
 from typing import Literal
 
 import jax
@@ -87,7 +114,7 @@ class BaseVAE:
                     )
                 elif self.model_mode=="b":
 
-                    return numpyro.sample("obs", dist.Bernoulli(x).to_event(1))
+                    return numpyro.sample("obs", dist.Bernoulli(logits=x).to_event(1))
                 
         return generative_model
 
@@ -138,7 +165,7 @@ class BaseVAE:
         return values
     
 
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, annealed_sites=["z"], annealing_epochs=100):
+    def train(self, dataloader, total_size, optim, num_epochs, rng_key, annealed_sites=["z"], annealing_epochs=1):
         assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
         annealing_epochs = max(1, annealing_epochs)
         self.train_mode()
@@ -221,11 +248,17 @@ class FlowBasicVAE(BaseVAE):
                 
                 numpyro.deterministic("clean", img_loc)
                 
-                # P(x|z,m)
-                return numpyro.sample(
-                    "obs", 
-                    dist.Normal(img_loc, scale=self.normal_scale).to_event(1)
-                )
+                #P(x|z, m)
+                if self.model_mode == "n":    
+                    return numpyro.sample(
+                        "obs", 
+                        dist.Normal(img_loc, scale=self.normal_scale).to_event(1)
+                    )
+                elif self.model_mode == "b":
+                    return numpyro.sample(
+                        "obs", 
+                        dist.Bernoulli(logits=img_loc).to_event(1)
+                    )
                 
         return generative_model
 
@@ -523,17 +556,23 @@ class LearnedMeanGuideFlowGlobalVAE(GuideFlowGlobalVAE):
                 numpyro.deterministic("clean", img_loc)
                 
                 #P(x|z, m)
-                return numpyro.sample(
-                    "obs", 
-                    dist.Normal(img_loc, scale=self.normal_scale).to_event(1)
-                )
+                if self.model_mode == "n":    
+                    return numpyro.sample(
+                        "obs", 
+                        dist.Normal(img_loc, scale=self.normal_scale).to_event(1)
+                    )
+                elif self.model_mode == "b":
+                    return numpyro.sample(
+                        "obs", 
+                        dist.Bernoulli(logits=img_loc).to_event(1)
+                    )
                 
         return generative_model
 
 
 class SteinGlobalVAE(GlobalVAE):
     def train(self, dataloader, total_size, optim, num_epochs, rng_key, num_stein_particles, repulsion_temperature=1, 
-              bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=100, beta_ceiling=1.0, num_elbo_particles=10):
+              bandwidth_scaler=1, annealed_sites=["z"], annealing_epochs=1, beta_ceiling=1.0, num_elbo_particles=10):
         assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
         
         self.train_mode()
@@ -696,7 +735,7 @@ class LearnedMeanSteinGuideFlowVAE(SteinGlobalVAE, LearnedMeanGuideFlowGlobalVAE
 
 
 
-class VAE74(GuideFlowGlobalVAE):
+class HierarchicalVAE(GuideFlowGlobalVAE):
     def __init__(
         self, 
         decoder_stax,
@@ -782,14 +821,15 @@ class VAE74(GuideFlowGlobalVAE):
                 concat_input = jnp.concatenate([z, m + jnp.zeros((num_samples, self.m_dim))], axis=1)
 
                 x = decode(concat_input)
+                x_squished = jax.nn.sigmoid(x)
                 
-                numpyro.deterministic("x", jax.nn.sigmoid(x))
+                numpyro.deterministic("x", x_squished)
 
                 #P(x|z, m)
                 if self.model_mode=="n":    
                     return numpyro.sample(
                         "obs", 
-                        dist.Normal(x, scale=self.normal_scale).to_event(1)
+                        dist.Normal(x_squished, scale=self.normal_scale).to_event(1)
                     )
                 elif self.model_mode=="b":
 
@@ -873,142 +913,257 @@ class VAE74(GuideFlowGlobalVAE):
     
 
 
-class SMIVAE74(SteinGlobalVAE, VAE74):
-    pass
-    
+class SteinHierarchicalVAE(SteinGlobalVAE, HierarchicalVAE):
 
+    #Generated by ChatGPT 5.5
+    def evaluate_iwae(self, dataloader, size, rng_key, num_particles=500):
+        """
+        Evaluation-only IWAE score for the predictive model:
 
+            m ~ q_stein(m)
+            z_L,...,z_0 ~ p_theta(z | m)
+            x ~ p_theta(x | z_0, m)
 
+        This is not the original prior likelihood with m ~ p(m).
+        """
 
+        self.eval_mode()
 
-class PostHocSteinVAE(BaseVAE):
+        def predictive_qm_dist():
+            a = numpyro.param("a")
+            B = numpyro.param("B", constraint=dist.constraints.positive)
 
-    def __init__(
-        self, 
-        encoder_stax,
-        encoder_args,
-        decoder_stax,
-        decoder_args,
-        z_dim,
-        model_mode: Literal["n", "b"] = "n", 
-        normal_scale=1.0
-    ):
-        super().__init__(
-            encoder_stax,
-            encoder_args,
-            decoder_stax,
-            decoder_args,
-            z_dim,
-            model_mode, 
-            normal_scale
+            S = a.shape[0]
+
+            mixing = dist.Categorical(
+                probs=jnp.ones(S) / S
+            )
+
+            flow_transform = numpyro.module(
+                "flow",
+                self.flow(**self.flow_args),
+                input_shape=(self.m_dim,),
+            )()
+
+            components = []
+            for s in range(S):
+                base_s = dist.Normal(
+                    a[s],
+                    B[s] + 1e-3,
+                ).to_event(1)
+
+                component_s = dist.TransformedDistribution(
+                    base_s,
+                    flow_transform,
+                )
+
+                components.append(component_s)
+
+            return dist.MixtureGeneral(
+                mixing,
+                components,
+            )
+
+        def predictive_model(batch):
+            batch = jnp.reshape(batch, (batch.shape[0], -1))
+            num_samples = batch.shape[0]
+
+            decode = numpyro.module(
+                "decoder",
+                self.decoder(**self.decoder_args),
+                (num_samples, self.z_dim + self.m_dim),
+            )
+
+            f_input_shape = (num_samples, self.z_dim + self.m_dim)
+            f_output_shape, _ = self.f_stax(**self.f_args)[0](
+                numpyro.prng_key(),
+                f_input_shape,
+            )
+
+            f_shared = numpyro.module(
+                "f",
+                self.f_stax(**self.f_args),
+                (num_samples, self.z_dim + self.m_dim),
+            )
+
+            g_d = numpyro.module(
+                "g_d",
+                self.g_d_stax(**self.g_d_args),
+                f_output_shape,
+            )
+
+            with numpyro.plate("batch", num_samples):
+                m = numpyro.sample("m", predictive_qm_dist())
+
+                z = jnp.zeros((num_samples, self.z_dim))
+
+                for l in range(self.L)[::-1]:
+                    shared_input = jnp.concatenate(
+                        [
+                            z,
+                            m + jnp.zeros((num_samples, self.m_dim)),
+                        ],
+                        axis=1,
+                    )
+
+                    shared_out = f_shared(shared_input)
+                    g_d_mean, g_d_scale = g_d(shared_out)
+
+                    z = numpyro.sample(
+                        f"z{l}",
+                        dist.Normal(g_d_mean, g_d_scale).to_event(1),
+                    )
+
+                concat_input = jnp.concatenate(
+                    [
+                        z,
+                        m + jnp.zeros((num_samples, self.m_dim)),
+                    ],
+                    axis=1,
+                )
+
+                x = decode(concat_input)
+                x_squished = jax.nn.sigmoid(x)
+
+                numpyro.deterministic("x", x_squished)
+
+                if self.model_mode == "n":
+                    numpyro.sample(
+                        "obs",
+                        dist.Normal(
+                            x_squished,
+                            scale=self.normal_scale,
+                        ).to_event(1),
+                        obs=batch,
+                    )
+
+                elif self.model_mode == "b":
+                    numpyro.sample(
+                        "obs",
+                        dist.Bernoulli(logits=x).to_event(1),
+                        obs=batch,
+                    )
+
+        def predictive_guide(batch):
+            batch = jnp.reshape(batch, (batch.shape[0], -1))
+            batch_dim, out_dim = batch.shape
+
+            f_input_shape = (batch_dim, self.z_dim + self.m_dim)
+
+            # Only used to infer shapes.
+            k = jax.random.PRNGKey(42)
+
+            f_output_shape, _ = self.f_stax(**self.f_args)[0](
+                k,
+                f_input_shape,
+            )
+
+            h_input_shape = (batch_dim, out_dim)
+
+            h_output_shape, h_init_params = self.h_stax(**self.h_args)[0](
+                k,
+                h_input_shape,
+            )
+
+            checkify.check(
+                h_output_shape[1] == f_output_shape[1],
+                "Must be the same since they will be summed together",
+            )
+
+            h = numpyro.module(
+                "h",
+                self.h_stax(**self.h_args),
+                (batch_dim, out_dim),
+            )
+
+            f_shared = numpyro.module(
+                "f",
+                self.f_stax(**self.f_args),
+                (batch_dim, self.z_dim + self.m_dim),
+            )
+
+            g_e = numpyro.module(
+                "g_e",
+                self.g_e_stax(**self.g_e_args),
+                (batch_dim, f_output_shape[-1]),
+            )
+
+            h_out = h(batch)
+
+            h_params = numpyro.param("h$params", h_init_params)
+
+            checkify.check(
+                ~jnp.isnan(h_out).any(),
+                "NaNs found in h_out!: {h_out}, batch: {batch}, param: {param}",
+                h_out=h_out,
+                batch=batch,
+                param=h_params,
+            )
+
+            with numpyro.plate("batch", batch_dim):
+                m = numpyro.sample(
+                    "m",
+                    predictive_qm_dist(),
+                )
+
+                m_broadcasted = m + jnp.zeros((batch_dim, self.m_dim))
+
+                z = jnp.zeros((batch_dim, self.z_dim))
+
+                for l in range(self.L)[::-1]:
+                    f_input = jnp.concatenate(
+                        [z, m_broadcasted],
+                        axis=1,
+                    )
+
+                    f_out = f_shared(f_input)
+
+                    g_e_input = f_out + h_out
+
+                    g_e_mean, g_e_scale = g_e(g_e_input)
+
+                    z = numpyro.sample(
+                        f"z{l}",
+                        dist.Normal(g_e_mean, g_e_scale).to_event(1),
+                    )
+
+            return None
+
+        objective = RenyiELBO(
+            alpha=0,
+            num_particles=num_particles,
         )
 
-    def get_post_hoc_prior_guide(self):
-        def prior_guide(batch=None, num_samples=None, **kwargs):
-            assert (batch is not None) or (num_samples is not None), "Must provide either batch or num_samples"
-            n = batch.shape[0] if batch is not None else num_samples
-        
-
-            a = numpyro.param("a", lambda key: dist.Normal(0, 5).expand([self.z_dim]).sample(key))
-            B = numpyro.param("B", lambda key: 0.1*jnp.ones(self.z_dim), constraint=dist.constraints.positive)
-            with numpyro.plate("batch", n):
-                z = numpyro.sample("z", dist.Normal(a, B).to_event(1))
-
-                return z
-        return prior_guide
+        total = 0.0
+        key = rng_key
 
 
+        def loss_fn(rng_key, params, batch):
+            return objective.loss(
+                rng_key,
+                params,
+                predictive_model,
+                predictive_guide,
+                batch,
+            )
+        jitted_loss = jax.jit(checkify.checkify(loss_fn))
 
-    def train(self, dataloader, total_size, optim, num_epochs, rng_key, annealed_sites=["z"], annealing_epochs=100, num_stein_particles=5, post_hoc_epochs=1000):
-        key1, key2 = jax.random.split(rng_key)
-        self.num_stein_particles = num_stein_particles
-        
-        assert annealing_epochs <= num_epochs, "Annealing epochs cannot be greater than total epochs"
-        annealing_epochs = max(1, annealing_epochs)
-        self.train_mode()
-        self.total_size = total_size
+        for batch in dataloader:
+            key, subkey = jax.random.split(key)
 
-        svi = SVI(self.get_training_model(), self.get_guide(), optim, Trace_ELBO())
-        
-        
+            err, loss = jitted_loss(
+                subkey,
+                self.params,
+                batch,
+            )
 
-        dummy_batch = next(iter(dataloader))
-        svi_state = svi.init(key1, dummy_batch)
+            err.throw()
 
+            batch_score = -loss
+            total = total + batch_score
 
-        @jax.jit
-        def annealed_update_step(svi_state, batch, beta):
-            with scale_sites(scale=beta, sites=annealed_sites):
-                return svi.update(svi_state, batch)
-        
-        
-            
-        for epoch in trange(num_epochs):
-            for batch in dataloader:
-                svi_state, loss = annealed_update_step(svi_state, batch, beta=max(1e-4, min(1.0, 1.0*epoch/annealing_epochs)))
-                
-        self.params = svi.get_params(svi_state)
-
-
-
-
-        # Post hoc STEIN VI on prior
-
-
-
-        kernel = SingleSiteRBFKernel("a", bandwidth_factor=lambda n: 1 / jnp.log(n))
-        frozen_model = substitute(self.get_training_model(), data=self.params)
-        
-        stein = SteinVI(frozen_model,self.get_post_hoc_prior_guide(), optim, kernel, num_stein_particles=num_stein_particles, repulsion_temperature=1) 
-
-
-        stein_state = stein.init(key2, dummy_batch)
-
-        #Overwrite starting place for a
-
-        init_batch = next(iter(dataloader))
-        encoded_trace = self.encode_batch(init_batch, key2)
-        encoded_zs = encoded_trace["z"]
-        KMeans_model = KMeans(n_clusters=num_stein_particles, random_state=0).fit(encoded_zs)
-        init_a = jnp.array(KMeans_model.cluster_centers_)
-
-
-
-        p = stein.get_params(stein_state)
-        p["a"] = init_a
-
-        stein_state =stein_state._replace(optim_state=optim.init(p))
-
-
-        jitted_step = jax.jit(stein.update)
-
-
-        
-
-        for epoch in trange(post_hoc_epochs):
-            for batch in dataloader:
-                stein_state, _, loss = jitted_step(stein_state, batch)
-        
-        
-        self.post_hoc_params = stein.get_params(stein_state)
-    
-
-    def get_post_hoc_samples(self, rng_key, num_samples=100):
-        self.eval_mode()
-        guide = self.get_post_hoc_prior_guide()
-
-        def single_sample(rng_key):
-            rng_key, sub_key, g_key = jax.random.split(rng_key, 3)
-            particle = jax.random.randint(sub_key, (), 0, self.num_stein_particles)
-            params = dict(self.post_hoc_params)
-
-            params["a"] = jax.tree.map(lambda x: x[particle], params["a"])
-            params["B"] = jax.tree.map(lambda x: x[particle], params["B"])
-
-            g = numpyro.handlers.seed(guide, rng_seed=g_key)
-            g = numpyro.handlers.substitute(g, data=params)
-            return g(num_samples=1)[0], particle
-        zs, zidx = jax.vmap(single_sample)(jax.random.split(rng_key, num_samples))
-        return {"z": zs, "zidx": zidx}
-
-        
+        return {
+            "total_iwae": total,
+            "avg_iwae": total / size,
+            "avg_nll": -total / size,
+        }

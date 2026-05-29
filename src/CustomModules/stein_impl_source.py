@@ -1,3 +1,11 @@
+'''
+This is the source code of SteinVI (Stein Mixture Inference) class. We have modified it slightly to work with our project, 
+by for example returning extra information such as the ELBO during traing and the norms of the gradient. Also fixed a bug for it to work with non-stein parameters.
+
+'''
+
+
+
 # Copyright Contributors to the Pyro project.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -375,6 +383,7 @@ class SteinVI:
             self.constrain_fn(nonmix_uparams),
             model,
             self.guide,
+
             unravel_pytree_batched(vmap(particle_transform_fn)(stein_particles)),
             *args,
             **kwargs,

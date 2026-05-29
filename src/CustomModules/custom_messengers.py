@@ -1,3 +1,10 @@
+
+
+# This is a script for custom messengers in NumPyro. 
+# Its main purpose is to serve the scale_sites messenger which is used throughout the project for KL Annealing by scaling the
+# log probability of specifc sites. 
+
+
 # CREATED BY GEMINI 3.1
 
 import jax
